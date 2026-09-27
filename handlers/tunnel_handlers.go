@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -184,6 +185,16 @@ func (h *TunnelHandlers) forwardRequestToTunnel(c *gin.Context, connection *mode
 		if headers, ok := response.Headers.(map[string]interface{}); ok {
 			for key, value := range headers {
 				if hv, ok := value.(string); ok {
+					// ── FIX: skip content-encoding and content-length ──
+					// The tunnel client (Node.js) has already decompressed
+					// the body before sending it back over the WebSocket.
+					// Forwarding the compression header would make the browser
+					// try to gunzip a plain-text body, producing garbled output.
+					// content-length is also stale (compressed length ≠ body length).
+					lk := strings.ToLower(key)
+					if lk == "content-encoding" || lk == "content-length" {
+						continue
+					}
 					c.Header(key, hv)
 				}
 			}
@@ -246,18 +257,25 @@ func readBody(r interface{ Read([]byte) (int, error) }, max int) ([]byte, error)
 	total := 0
 	for {
 		n, err := r.Read(tmp)
+		if err != nil {
+			if n > 0 {
+				total += n
+				if total > max {
+					return nil, fmt.Errorf("body exceeds %d bytes", max)
+				}
+				buf = append(buf, tmp[:n]...)
+			}
+			if err.Error() == "EOF" {
+				return buf, nil
+			}
+			return buf, err
+		}
 		if n > 0 {
 			total += n
 			if total > max {
 				return nil, fmt.Errorf("body exceeds %d bytes", max)
 			}
 			buf = append(buf, tmp[:n]...)
-		}
-		if err != nil {
-			if err.Error() == "EOF" {
-				return buf, nil
-			}
-			return buf, err
 		}
 	}
 }
